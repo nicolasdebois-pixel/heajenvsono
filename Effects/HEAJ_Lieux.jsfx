@@ -1,0 +1,164 @@
+desc:HEAJ Lieux - reverb de sound design
+author: HEAJ - Nicolas Debois (cours Environnements sonores)
+version: 1.0
+tags: reverb sound design lieux HEAJ
+//
+// Une reverb pensee pour le sound design : on choisit un lieu, puis la distance.
+//   Lieu      : la taille, la duree et la matiere des murs du lieu.
+//   Distance  : 0 % = la source est tout pres ; 100 % = elle est au fond du lieu.
+//   Quantite  : plus ou moins de reverb que le reglage du lieu.
+//   Son direct: "Non" quand le plugin est place sur une piste d'envoi (send).
+//
+slider1:7<0,15,1{Petite chambre,Salle de bain,Voiture (habitacle),Salle de classe,Couloir,Cage d'escalier,Parking souterrain,Hall de gare,Eglise,Grotte,Ruelle entre deux murs,Foret,Exterieur degage,Coque metallique (imaginaire),Reve sans fin (imaginaire),Caverne de cristal (imaginaire)}>Lieu
+slider2:30<0,100,1>Distance (%)
+slider3:0<-18,6,0.5>Quantite de reverb (dB)
+slider4:0<0,1,1{Oui (en insert),Non (100% reverb sur un envoi)}>Son direct
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+ext_tail_size = -1;
+NC = 8; NA = 4;
+// longueurs de Freeverb (a 44,1 kHz)
+ct = 0;   ct[0]=1116; ct[1]=1188; ct[2]=1277; ct[3]=1356; ct[4]=1422; ct[5]=1491; ct[6]=1557; ct[7]=1617;
+at = 10;  at[0]=556;  at[1]=441;  at[2]=341;  at[3]=225;
+SPREAD = 23;
+k = srate / 44100;
+cmax = ceil((1617 + SPREAD) * 1.7 * k) + 4;
+amax = ceil((556 + SPREAD) * k) + 4;
+pmax = ceil(0.12 * srate) + 4;
+smax = ceil(0.45 * srate) + 4;
+// zones memoire
+clen = 20; cpos = 40; cfil = 60;        // 16 combs : longueur, position, filtre
+alen = 80; apos = 90;                   // 8 allpass
+cfb = 120;                              // 16 retours
+cbuf = 1000;
+abuf = cbuf + 16 * cmax;
+pbuf = abuf + 8 * amax;
+sbuf = pbuf + pmax;
+memtop = sbuf + smax;
+freembuf(memtop + 16);
+memset(cbuf, 0, memtop - cbuf);
+ppos = 0; spos = 0;
+lastp = -1;
+dl = dr = 0; hl = hr = 0; hxl = hxr = 0;
+
+function db(x) ( 10 ^ (x / 20); );
+
+@slider
+p = slider1 | 0;
+// sz : taille   rt : duree (s)   dm : murs absorbants (0 = durs et brillants)
+// pr : pre-delay (ms)   wd : niveau de reverb (dB)   lc : coupe-bas de la reverb (Hz)
+// sl : echo (ms, 0 = aucun)   sf : repetitions de l'echo   sd : niveau de l'echo (dB)
+p==0  ? ( sz=0.32; rt=0.40; dm=0.60; pr=2;  wd=-13; lc=150; sl=0;   sf=0;    sd=-60; );
+p==1  ? ( sz=0.28; rt=0.90; dm=0.08; pr=1;  wd=-8;  lc=200; sl=0;   sf=0;    sd=-60; );
+p==2  ? ( sz=0.15; rt=0.18; dm=0.65; pr=0;  wd=-14; lc=180; sl=0;   sf=0;    sd=-60; );
+p==3  ? ( sz=0.55; rt=0.75; dm=0.35; pr=6;  wd=-11; lc=150; sl=0;   sf=0;    sd=-60; );
+p==4  ? ( sz=0.60; rt=1.10; dm=0.30; pr=4;  wd=-10; lc=150; sl=28;  sf=0.35; sd=-16; );
+p==5  ? ( sz=0.75; rt=2.20; dm=0.15; pr=8;  wd=-8;  lc=120; sl=0;   sf=0;    sd=-60; );
+p==6  ? ( sz=1.10; rt=2.80; dm=0.10; pr=14; wd=-8;  lc=100; sl=0;   sf=0;    sd=-60; );
+p==7  ? ( sz=1.25; rt=3.00; dm=0.35; pr=25; wd=-8;  lc=120; sl=0;   sf=0;    sd=-60; );
+p==8  ? ( sz=1.50; rt=5.00; dm=0.40; pr=40; wd=-7;  lc=100; sl=0;   sf=0;    sd=-60; );
+p==9  ? ( sz=1.00; rt=3.50; dm=0.20; pr=20; wd=-7;  lc=80;  sl=110; sf=0.40; sd=-14; );
+p==10 ? ( sz=0.40; rt=0.60; dm=0.25; pr=5;  wd=-16; lc=250; sl=45;  sf=0.45; sd=-10; );
+p==11 ? ( sz=0.90; rt=0.70; dm=0.80; pr=12; wd=-17; lc=200; sl=0;   sf=0;    sd=-60; );
+p==12 ? ( sz=0.50; rt=0.30; dm=0.70; pr=5;  wd=-24; lc=300; sl=260; sf=0.10; sd=-20; );
+p==13 ? ( sz=0.45; rt=3.00; dm=0.02; pr=2;  wd=-10; lc=250; sl=17;  sf=0.70; sd=-12; );
+p==14 ? ( sz=1.60; rt=14.0; dm=0.30; pr=60; wd=-6;  lc=150; sl=0;   sf=0;    sd=-60; );
+p==15 ? ( sz=1.00; rt=6.00; dm=0.00; pr=30; wd=-8;  lc=400; sl=140; sf=0.45; sd=-14; );
+
+d = slider2 / 100;
+// longueurs des combs et coefficients de retour pour la duree voulue
+i = 0;
+loop(16,
+  len = floor((ct[i % 8] * sz + (i >= 8 ? SPREAD : 0)) * k);
+  len = max(16, min(cmax - 2, len));
+  clen[i] = len;
+  cpos[i] >= len ? cpos[i] = 0;
+  i += 1;
+);
+i = 0;
+loop(16, cfb[i] = 10 ^ (-3 * clen[i] / (rt * srate)); i += 1; );
+i = 0;
+loop(8,
+  len = floor((at[i % 4] + (i >= 4 ? SPREAD : 0)) * k);
+  alen[i] = max(8, min(amax - 2, len));
+  apos[i] >= alen[i] ? apos[i] = 0;
+  i += 1;
+);
+// on vide la reverb quand on change de lieu
+p != lastp ? ( memset(cbuf, 0, memtop - cbuf); i = 0; loop(16, cfil[i] = 0; i += 1;); lastp = p; );
+
+// energie moyenne des combs, pour que "Quantite" reste lisible d'un lieu a l'autre
+avg = 0; i = 0; loop(8, avg += cfb[i] * cfb[i]; i += 1;); avg /= 8;
+norm = sqrt(1 - avg) * 0.35;
+damp = dm * 0.6;
+
+// la distance : moins de son direct, plus sombre, plus de reverb, pre-delay plus court
+dryg = slider4 >= 0.5 ? 0 : db(-10 * d);
+wetg = db(wd + slider3 - 14 + 8 * d) * norm;
+predel = max(1, floor(pr * (1 - 0.7 * d) * 0.001 * srate));
+fc = 18000 * (1 - d) + 3500 * d;
+lpa = exp(-2 * $pi * fc / srate);
+hpa = exp(-2 * $pi * lc / srate);
+slen = sl > 0 ? max(1, floor(sl * 0.001 * srate)) : 0;
+slg = db(sd + slider3 + 6 * d - 8);
+
+@sample
+mono = (spl0 + spl1) * 0.5;
+
+// pre-delay
+pbuf[ppos] = mono;
+rp = ppos - predel; rp < 0 ? rp += pmax;
+x = pbuf[rp];
+ppos += 1; ppos >= pmax ? ppos = 0;
+
+// combs en parallele (8 a gauche, 8 a droite)
+ol = or = 0;
+i = 0;
+loop(16,
+  b = cbuf + i * cmax;
+  ps = cpos[i];
+  y = b[ps];
+  cfil[i] = y * (1 - damp) + cfil[i] * damp;
+  b[ps] = x + cfil[i] * cfb[i];
+  ps += 1; ps >= clen[i] ? ps = 0; cpos[i] = ps;
+  i < 8 ? ol += y : or += y;
+  i += 1;
+);
+
+// allpass en serie (diffusion)
+i = 0;
+loop(4,
+  b = abuf + i * amax; ps = apos[i]; bo = b[ps];
+  b[ps] = ol + bo * 0.5; ol = bo - ol;
+  ps += 1; ps >= alen[i] ? ps = 0; apos[i] = ps;
+  b = abuf + (i + 4) * amax; ps = apos[i + 4]; bo = b[ps];
+  b[ps] = or + bo * 0.5; or = bo - or;
+  ps += 1; ps >= alen[i + 4] ? ps = 0; apos[i + 4] = ps;
+  i += 1;
+);
+
+// echo (ruelle, grotte, metal...)
+ec = 0;
+slen > 0 ? (
+  rp = spos - slen; rp < 0 ? rp += smax;
+  ec = sbuf[rp];
+  sbuf[spos] = mono + ec * sf;
+) : sbuf[spos] = 0;
+spos += 1; spos >= smax ? spos = 0;
+
+// coupe-bas sur la reverb
+wl = ol * wetg; wr = or * wetg;
+hl = hpa * (hl + wl - hxl); hxl = wl;
+hr = hpa * (hr + wr - hxr); hxr = wr;
+
+// son direct assombri par la distance
+dl = spl0 + lpa * (dl - spl0);
+dr = spl1 + lpa * (dr - spl1);
+
+spl0 = dl * dryg + hl + ec * slg;
+spl1 = dr * dryg + hr + ec * slg * 0.92;

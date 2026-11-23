@@ -1,0 +1,422 @@
+desc:HEAJ Synthe-Sampler - un instrument basique pour apprendre
+author: HEAJ - Nicolas Debois (cours Environnements sonores)
+version: 2.2
+tags: instrument synthesizer sampler HEAJ
+//
+// Un instrument volontairement minimal, en trois etages :
+//   1. SOURCE     : un oscillateur (synthese) OU un fichier audio (sampling)
+//   2. FILTRE     : on retire une partie des frequences
+//   3. ENVELOPPE  : on decide comment le son demarre, tient et s'eteint (ADSR)
+//
+// Synthese : choisissez une forme d'onde, jouez des notes.
+// Sampling : glissez un fichier audio dans la fenetre du plugin, jouez des notes.
+//            Le Do central (C4, note 60) rejoue le fichier a sa hauteur d'origine.
+// Pour ecouter sans clavier : boutons "Preview" (synthese) et "Play" (sampling) dans la fenetre.
+// Pour jouer : clavier MIDI, ou clavier virtuel de Reaper (View > Virtual MIDI keyboard).
+//
+options:maxmem=16777216
+
+slider1:0<0,1,1{Oscillateur (synthese),Fichier audio (sampling)}>1. Source
+slider2:2<0,4,1{Sinus,Triangle,Dent de scie,Carre,Bruit}>1a. Forme d'onde (oscillateur)
+slider3:0<0,100,0.1>1b. Debut du fichier (%)
+slider4:100<0,100,0.1>1c. Fin du fichier (%)
+slider5:0<0,3,1{Une fois,En boucle,A l'envers,A l'envers en boucle}>1d. Lecture du fichier
+slider6:0<-24,24,1>1e. Hauteur (demi-tons)
+slider7:1<0,3,1{Aucun,Passe-bas,Passe-haut,Passe-bande}>2. Filtre
+slider8:70<0,100,0.1>2a. Frequence de coupure (%)
+slider9:10<0,100,0.1>2b. Resonance (%)
+slider10:5<0,5000,1>3a. Attaque (ms)
+slider11:300<1,5000,1>3b. Decroissance (ms)
+slider12:70<0,100,1>3c. Maintien (%)
+slider13:400<1,8000,1>3d. Relachement (ms)
+slider14:-6<-40,6,0.5>Volume (dB)
+
+in_pin:none
+out_pin:left output
+out_pin:right output
+
+@init
+ext_noinit = 1;
+NV = 8;                                   // 8 notes en meme temps
+vact = 100; vnote = 120; vvel = 140; vst = 160; vlev = 180; vph = 200; vrs = 220; vage = 240; vsrc = 260;
+PK = 1000; NPK = 600;                      // apercu de la forme d'onde
+SB = 4096;                                 // le fichier audio, en memoire
+MAXS = 16777216 - SB - 16;
+memset(vact, 0, 180);
+pv_req = pl_req = 0; pv_on = pl_on = 0; pv_v = pl_v = -1; meter = 0;
+slen = 0; snch = 1; ssr = 44100; loaded = 0;
+#path = "";
+age = 0;
+
+// ---- filtre a variable d'etat (TPT) ----
+function svf_set(fc, q) instance(g, k, a1, a2, a3) (
+  fc = max(20, min(fc, srate * 0.45));
+  g = tan($pi * fc / srate); k = 1 / q;
+  a1 = 1 / (1 + g * (g + k)); a2 = g * a1; a3 = g * a2;
+);
+function svf(x) instance(k, a1, a2, a3, ic1, ic2, lp, bp, hp) local(v1, v2, v3) (
+  v3 = x - ic2; v1 = a1 * ic1 + a2 * v3; v2 = ic2 + a2 * ic1 + a3 * v3;
+  ic1 = 2 * v1 - ic1; ic2 = 2 * v2 - ic2;
+  lp = v2; bp = v1; hp = x - k * v1 - v2;
+);
+// ---- correction des angles vifs (moins de sifflements numeriques) ----
+function blep(t, dt) (
+  t < dt ? ( t /= dt; t + t - t * t - 1; ) :
+  t > 1 - dt ? ( t = (t - 1) / dt; t * t + t + t + 1; ) : 0;
+);
+
+// ---- demarrer / relacher une note ----
+function note_on(n, vel, s) local(v, i, old) (
+  v = -1; i = 0; old = 10000000000;
+  loop(NV, vact[i] == 0 && v < 0 ? v = i; i += 1;);
+  v < 0 ? ( i = 0; loop(NV, vage[i] < old ? ( old = vage[i]; v = i; ); i += 1;); );
+  vact[v] = 1; vnote[v] = n; vvel[v] = vel; vst[v] = 1; vlev[v] = 0; vsrc[v] = s;
+  vage[v] = age; age += 1;
+  vph[v] = s == 0 ? 0 : (mode >= 2 ? max(s0, s1 - 1) : s0);
+  v;
+);
+function note_release(v) (
+  v >= 0 && vact[v] && vst[v] < 4 ? ( vst[v] = 4; vrs[v] = max(vlev[v], 0.0001) / rel; );
+);
+
+// ---- charger un fichier audio (wav, mp3, ogg, flac... tout ce que Reaper lit) ----
+function load_sample() local(h, n, i, j, mx, x, step) (
+  loaded = 0; slen = 0;
+  h = file_open(#path);
+  h >= 0 ? (
+    snch = 0; ssr = 0;
+    file_riff(h, snch, ssr);
+    snch > 0 && ssr > 0 ? (
+      snch = min(snch, 2);
+      n = min(file_avail(h), MAXS);
+      n = floor(n / snch) * snch;
+      file_mem(h, SB, n);
+      slen = n / snch;
+      loaded = slen > 16;
+      // apercu : un pic par colonne
+      step = slen / NPK; i = 0;
+      loop(NPK,
+        mx = 0; j = floor(i * step);
+        loop(max(1, floor(step / 16)),
+          x = abs(SB[j * snch]); x > mx ? mx = x;
+          j += 16;
+        );
+        PK[i] = mx; i += 1;
+      );
+    );
+    file_close(h);
+  );
+);
+
+@serialize
+file_string(0, #path);
+file_avail(0) >= 0 && strlen(#path) > 0 ? load_sample();
+
+@slider
+src = slider1 | 0;
+wave = slider2 | 0;
+mode = slider5 | 0;
+tune = slider6;
+ftype = slider7 | 0;
+fc = 20 * 1000 ^ (slider8 / 100);
+fq = 0.5 * 24 ^ (slider9 / 100);
+filtL.svf_set(fc, fq); filtR.svf_set(fc, fq);
+att = max(1, slider10 * 0.001 * srate);
+dec = max(1, slider11 * 0.001 * srate);
+sus = slider12 / 100;
+rel = max(1, slider13 * 0.001 * srate);
+vol = 10 ^ (slider14 / 20);
+
+@block
+s0 = floor(min(slider3, slider4) / 100 * slen);
+s1 = floor(max(slider3, slider4) / 100 * slen);
+s1 - s0 < 2 ? s1 = min(slen, s0 + 2);
+while (midirecv(ofs, m1, m2, m3)) (
+  st = m1 & 0xF0;
+  st == 0x90 && m3 > 0 ? (
+    note_on(m2, m3 / 127, src);
+  ) : (st == 0x80 || (st == 0x90 && m3 == 0)) ? (
+    i = 0;
+    loop(NV, vact[i] && vnote[i] == m2 && vsrc[i] == src ? note_release(i); i += 1;);
+  ) : st == 0xB0 && (m2 == 123 || m2 == 120) ? (
+    i = 0; loop(NV, vact[i] = 0; i += 1;);
+  );
+  midisend(ofs, m1, m2, m3);
+);
+// ---- boutons de la fenetre : Preview (synthese) et Play (sampling) ----
+pv_req == 1 ? ( pv_v = note_on(60, 0.8, 0); pv_on = 1; );
+pv_req == 2 ? ( note_release(pv_v); pv_on = 0; );
+pv_req = 0;
+pl_req == 1 && loaded ? ( pl_v = note_on(60, 0.8, 1); pl_on = 1; );
+pl_req == 2 ? ( note_release(pl_v); pl_on = 0; );
+pl_req = 0;
+pl_on && (pl_v < 0 || vact[pl_v] == 0 || vsrc[pl_v] != 1) ? pl_on = 0;
+pv_on && (pv_v < 0 || vact[pv_v] == 0 || vsrc[pv_v] != 0) ? pv_on = 0;
+
+@sample
+oL = oR = 0;
+i = 0;
+loop(NV,
+  vact[i] ? (
+    // ---- enveloppe ADSR ----
+    e = vlev[i]; stg = vst[i];
+    stg == 1 ? ( e += 1 / att; e >= 1 ? ( e = 1; vst[i] = 2; ); ) :
+    stg == 2 ? ( e -= (1 - sus) / dec; e <= sus ? ( e = sus; vst[i] = 3; ); ) :
+    stg == 3 ? ( e = sus; ) :
+    stg == 4 ? ( e -= vrs[i]; e <= 0 ? ( e = 0; vact[i] = 0; ); );
+    vlev[i] = e;
+    sL = sR = 0;
+    vsrc[i] == 0 ? (
+      // ---- 1. SOURCE : oscillateur ----
+      f = 440 * 2 ^ ((vnote[i] - 69 + tune) / 12);
+      dt = min(0.45, f / srate); ph = vph[i];
+      wave == 0 ? s = sin(2 * $pi * ph) :
+      wave == 1 ? s = 4 * abs(ph - 0.5) - 1 :
+      wave == 2 ? s = 2 * ph - 1 - blep(ph, dt) :
+      wave == 3 ? ( s = ph < 0.5 ? 1 : -1; p2 = ph + 0.5; p2 >= 1 ? p2 -= 1; s += blep(ph, dt) - blep(p2, dt); ) :
+      s = rand(2) - 1;
+      ph += dt; ph >= 1 ? ph -= 1; vph[i] = ph;
+      sL = sR = s;
+    ) : loaded ? (
+      // ---- 1. SOURCE : fichier audio ----
+      inc = 2 ^ ((vnote[i] - 60 + tune) / 12) * ssr / srate;
+      pos = vph[i]; ip = floor(pos); fr = pos - ip;
+      a = SB + ip * snch; b = SB + min(ip + 1, slen - 1) * snch;
+      sL = a[0] + (b[0] - a[0]) * fr;
+      sR = snch > 1 ? a[1] + (b[1] - a[1]) * fr : sL;
+      // petit fondu aux extremites pour eviter les clics
+      edge = min(pos - s0, s1 - pos) / (0.003 * ssr);
+      mode == 1 || mode == 3 ? edge = 1;
+      g = min(1, max(0, edge)); sL *= g; sR *= g;
+      mode < 2 ? (
+        pos += inc;
+        pos >= s1 - 1 ? ( mode == 1 ? pos -= (s1 - 1 - s0) : vact[i] = 0; );
+      ) : (
+        pos -= inc;
+        pos <= s0 ? ( mode == 3 ? pos += (s1 - 1 - s0) : vact[i] = 0; );
+      );
+      vph[i] = pos;
+    );
+    // ---- 3. ENVELOPPE et force de frappe ----
+    g = e * (0.35 + 0.65 * vvel[i]) * 0.3;
+    oL += sL * g; oR += sR * g;
+  );
+  i += 1;
+);
+// ---- 2. FILTRE ----
+ftype > 0 ? (
+  filtL.svf(oL); filtR.svf(oR);
+  ftype == 1 ? ( oL = filtL.lp; oR = filtR.lp; ) :
+  ftype == 2 ? ( oL = filtL.hp; oR = filtR.hp; ) :
+               ( oL = filtL.bp; oR = filtR.bp; );
+);
+spl0 = oL * vol;
+spl1 = oR * vol;
+meter = max(meter * 0.9999, max(abs(spl0), abs(spl1)));
+
+@gfx 680 470
+// ---- glisser-deposer un fichier ----
+gfx_getdropfile(0, #drop) ? (
+  strcpy(#path, #drop);
+  load_sample();
+  loaded ? ( slider1 = 1; sliderchange(slider1); slider3 = 0; slider4 = 100; sliderchange(slider3); sliderchange(slider4); );
+  gfx_getdropfile(-1);
+);
+
+gfx_set(0.075, 0.08, 0.1); gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_setfont(1, "Arial", 18, 'b');
+gfx_set(0.894, 0.071, 0.153); gfx_x = 14; gfx_y = 10; gfx_drawstr("HEAJ");
+gfx_set(1, 1, 1); gfx_drawstr("  Synthe-Sampler");
+
+// ---- la chaine : source > filtre > enveloppe ----
+bx = 14; by = 40; bw = (gfx_w - 28 - 2 * 24) / 3; bh = 46;
+gfx_setfont(2, "Arial", 14, 'b');
+gi = 0;
+loop(3,
+  gx0 = bx + gi * (bw + 24);
+  gfx_set(0.16, 0.17, 0.2); gfx_rect(gx0, by, bw, bh);
+  gfx_set(0.894, 0.071, 0.153); gfx_rect(gx0, by, 4, bh);
+  gfx_set(1, 1, 1); gfx_x = gx0 + 12; gfx_y = by + 7;
+  gi == 0 ? gfx_drawstr("1. SOURCE") : gi == 1 ? gfx_drawstr("2. FILTRE") : gfx_drawstr("3. ENVELOPPE");
+  gfx_set(0.65, 0.68, 0.72); gfx_x = gx0 + 12; gfx_y = by + 25;
+  gi == 0 ? ( src == 0 ? (
+      wave == 0 ? gfx_drawstr("Oscillateur : sinus") : wave == 1 ? gfx_drawstr("Oscillateur : triangle") :
+      wave == 2 ? gfx_drawstr("Oscillateur : dent de scie") : wave == 3 ? gfx_drawstr("Oscillateur : carre") :
+      gfx_drawstr("Oscillateur : bruit");
+    ) : gfx_drawstr("Fichier audio"); ) :
+  gi == 1 ? (
+    ftype == 0 ? gfx_drawstr("Aucun") : (
+      ftype == 1 ? gfx_drawstr("Passe-bas, ") : ftype == 2 ? gfx_drawstr("Passe-haut, ") : gfx_drawstr("Passe-bande, ");
+      gfx_drawnumber(fc, 0); gfx_drawstr(" Hz");
+    );
+  ) : (
+    gfx_drawstr("A "); gfx_drawnumber(slider10, 0); gfx_drawstr(" D "); gfx_drawnumber(slider11, 0);
+    gfx_drawstr(" S "); gfx_drawnumber(slider12, 0); gfx_drawstr("% R "); gfx_drawnumber(slider13, 0);
+  );
+  gi < 2 ? ( gfx_set(0.65, 0.68, 0.72); gfx_x = gx0 + bw + 6; gfx_y = by + 15; gfx_drawstr(">"); );
+  gi += 1;
+);
+
+// ---- les boutons d'ecoute ----
+function button(x, y, w, h, on, label) local(hit) (
+  hit = mouse_x >= x && mouse_x <= x + w && mouse_y >= y && mouse_y <= y + h;
+  on ? gfx_set(0.894, 0.071, 0.153) : hit ? gfx_set(0.24, 0.25, 0.3) : gfx_set(0.16, 0.17, 0.2);
+  gfx_rect(x, y, w, h);
+  gfx_set(1, 1, 1);
+  on ? gfx_rect(x + 14, y + h / 2 - 6, 12, 12) : gfx_triangle(x + 14, y + h / 2 - 7, x + 14, y + h / 2 + 7, x + 27, y + h / 2);
+  gfx_x = x + 38; gfx_y = y + (h - 14) / 2; gfx_drawstr(label);
+  hit && clicked;
+);
+clicked = (mouse_cap & 1) && !(lastcap & 1);
+lastcap = mouse_cap;
+gfx_setfont(2, "Arial", 14, 'b');
+by2 = 98; bw2 = 210;
+button(14, by2, bw2, 34, pv_on, pv_on ? "Stop" : "Preview (synthese)") ? ( pv_req = pv_on ? 2 : 1; );
+loaded ? (
+  button(14 + bw2 + 12, by2, bw2, 34, pl_on, pl_on ? "Stop" : "Play (fichier audio)") ? ( pl_req = pl_on ? 2 : 1; );
+) : (
+  gfx_set(0.12, 0.13, 0.15); gfx_rect(14 + bw2 + 12, by2, bw2, 34);
+  gfx_set(0.4, 0.42, 0.46); gfx_x = 14 + bw2 + 50; gfx_y = by2 + 10; gfx_drawstr("Play : glissez un fichier");
+);
+// ---- niveau de sortie ----
+mx0 = 14 + 2 * (bw2 + 12); mw = gfx_w - 14 - mx0;
+gfx_set(0.65, 0.68, 0.72); gfx_setfont(3, "Arial", 13); gfx_x = mx0; gfx_y = by2 + 1; gfx_drawstr("Sortie");
+gfx_set(0.16, 0.17, 0.2); gfx_rect(mx0, by2 + 18, mw, 12);
+mdb = meter > 0.00001 ? 20 * log10(meter) : -60;
+gfx_set(0, 0.85, 1); gfx_rect(mx0, by2 + 18, mw * max(0, min(1, (mdb + 60) / 60)), 12);
+
+// ---- le filtre, dessine : ce qu'il laisse passer, frequence par frequence ----
+pw2 = (gfx_w - 28 - 12) / 2;
+fx0 = 14; fy0 = 144; fw = pw2; fh = 130;
+gfx_set(0.11, 0.12, 0.14); gfx_rect(fx0, fy0, fw, fh);
+gfx_set(0.3, 0.31, 0.36); gfx_rect(fx0, fy0, fw, fh, 0);
+gfx_setfont(3, "Arial", 13);
+gfx_set(0.65, 0.68, 0.72); gfx_x = fx0 + 10; gfx_y = fy0 + 6;
+ftype == 0 ? gfx_drawstr("2. FILTRE : aucun, tout passe") :
+ftype == 1 ? gfx_drawstr("2. FILTRE : passe-bas, garde les graves") :
+ftype == 2 ? gfx_drawstr("2. FILTRE : passe-haut, garde les aigus") :
+             gfx_drawstr("2. FILTRE : passe-bande, garde une zone");
+qx0 = fx0 + 12; qw = fw - 24; qy0 = fy0 + 26; qy1 = fy0 + fh - 20; qh = qy1 - qy0;
+DBT = 24; DBB = -36;                              // echelle verticale en dB
+gy0 = qy0 + qh * DBT / (DBT - DBB);               // ligne du 0 dB
+// grille : 100 Hz, 1 kHz, 10 kHz
+gfx_set(0.22, 0.23, 0.27);
+gfx_line(qx0, gy0, qx0 + qw, gy0);
+gi = 0;
+loop(3,
+  gf = 100 * 10 ^ gi; gxg = qx0 + qw * log(gf / 20) / log(1000);
+  gfx_set(0.22, 0.23, 0.27); gfx_line(gxg, qy0, gxg, qy1);
+  gfx_set(0.5, 0.52, 0.56); gfx_x = gxg - 12; gfx_y = qy1 + 4;
+  gi == 0 ? gfx_drawstr("100 Hz") : gi == 1 ? gfx_drawstr("1 kHz") : gfx_drawstr("10 kHz");
+  gi += 1;
+);
+gfx_set(0.5, 0.52, 0.56); gfx_x = qx0 + qw - 30; gfx_y = gy0 - 15; gfx_drawstr("0 dB");
+// la courbe de reponse
+gk2 = 1 / fq; gprev = -1;
+gi = 0;
+loop(qw + 1,
+  gf = 20 * 1000 ^ (gi / qw);
+  gr = gf / fc;
+  gden = sqrt((1 - gr * gr) ^ 2 + (gk2 * gr) ^ 2);
+  gmag = ftype == 0 ? 1 : ftype == 1 ? 1 / gden : ftype == 2 ? gr * gr / gden : gr / gden;
+  gdb = max(DBB, min(DBT, 20 * log10(max(gmag, 0.000001))));
+  gyy = qy0 + qh * (DBT - gdb) / (DBT - DBB);
+  gfx_set(0.894, 0.071, 0.153, 0.16); gfx_line(qx0 + gi, gyy, qx0 + gi, qy1);
+  gfx_set(0.894, 0.071, 0.153, 1);
+  gprev >= 0 ? ( gfx_line(qx0 + gi - 1, gprev, qx0 + gi, gyy, 1); gfx_line(qx0 + gi - 1, gprev + 1, qx0 + gi, gyy + 1, 1); );
+  gprev = gyy;
+  gi += 1;
+);
+// la frequence de coupure
+ftype > 0 ? (
+  gxc = qx0 + qw * log(fc / 20) / log(1000);
+  gfx_set(0, 0.85, 1); gfx_line(gxc, qy0, gxc, qy1);
+  gfx_x = min(gxc + 5, qx0 + qw - 70); gfx_y = qy0 + 2;
+  fc >= 1000 ? ( gfx_drawnumber(fc / 1000, 1); gfx_drawstr(" kHz"); ) : ( gfx_drawnumber(fc, 0); gfx_drawstr(" Hz"); );
+);
+
+// ---- l'enveloppe ADSR, dessinee ----
+ax = 14 + pw2 + 12; ay = 144; aw = pw2; ah = 130;
+gfx_set(0.11, 0.12, 0.14); gfx_rect(ax, ay, aw, ah);
+gfx_set(0.3, 0.31, 0.36); gfx_rect(ax, ay, aw, ah, 0);
+gfx_setfont(3, "Arial", 13);
+gfx_set(0.65, 0.68, 0.72); gfx_x = ax + 10; gfx_y = ay + 6; gfx_drawstr("3. ENVELOPPE (ADSR) : le volume dans le temps");
+ta = slider10; td = slider11; tr = slider13; gsus = slider12 / 100;
+th0 = max(200, 0.25 * (ta + td + tr));           // duree du maintien, pour le dessin
+tt = ta + td + th0 + tr;
+px0 = ax + 14; pw = aw - 28; py1 = ay + ah - 22; py0 = ay + 26; ph0 = py1 - py0;
+xa1 = px0 + pw * ta / tt;
+xd1 = xa1 + pw * td / tt;
+xs1 = xd1 + pw * th0 / tt;
+xr1 = px0 + pw;
+ys = py1 - ph0 * gsus;
+// surface sous la courbe
+gfx_set(0.894, 0.071, 0.153, 0.16);
+gfx_triangle(px0, py1, xa1, py0, xa1, py1);
+gfx_triangle(xa1, py0, xd1, ys, xd1, py1); gfx_triangle(xa1, py0, xa1, py1, xd1, py1);
+gfx_rect(xd1, ys, xs1 - xd1, py1 - ys);
+gfx_triangle(xs1, ys, xr1, py1, xs1, py1);
+// la courbe
+gfx_set(0.894, 0.071, 0.153, 1);
+gfx_line(px0, py1, xa1, py0, 1); gfx_line(xa1, py0, xd1, ys, 1);
+gfx_line(xd1, ys, xs1, ys, 1); gfx_line(xs1, ys, xr1, py1, 1);
+gfx_line(px0, py1 + 1, xa1, py0 + 1, 1); gfx_line(xa1, py0 + 1, xd1, ys + 1, 1);
+gfx_line(xd1, ys + 1, xs1, ys + 1, 1); gfx_line(xs1, ys + 1, xr1, py1 + 1, 1);
+// reperes et etiquettes
+gfx_set(0.3, 0.31, 0.36); gfx_line(xa1, py0, xa1, py1); gfx_line(xd1, ys, xd1, py1); gfx_line(xs1, ys, xs1, py1);
+gfx_set(1, 1, 1);
+gfx_x = (px0 + xa1) / 2 - 3; gfx_y = py1 + 4; gfx_drawstr("A");
+gfx_x = (xa1 + xd1) / 2 - 3; gfx_y = py1 + 4; gfx_drawstr("D");
+gfx_x = (xd1 + xs1) / 2 - 3; gfx_y = py1 + 4; gfx_drawstr("S");
+gfx_x = (xs1 + xr1) / 2 - 3; gfx_y = py1 + 4; gfx_drawstr("R");
+gfx_set(0.65, 0.68, 0.72);
+gfx_x = xd1 + 4; gfx_y = ys - 17; gfx_drawnumber(slider12, 0); gfx_drawstr(" %");
+// le point qui suit la derniere note jouee
+gv = -1; gbest = -1; gi = 0;
+loop(NV, vact[gi] && vage[gi] > gbest ? ( gbest = vage[gi]; gv = gi; ); gi += 1;);
+gv >= 0 ? (
+  gs = vst[gv]; ge = vlev[gv];
+  gs == 1 ? gxp = px0 + (xa1 - px0) * ge :
+  gs == 2 ? gxp = xa1 + (xd1 - xa1) * min(1, (1 - ge) / max(0.001, 1 - gsus)) :
+  gs == 3 ? gxp = (xd1 + xs1) / 2 :
+  gxp = xs1 + (xr1 - xs1) * (1 - min(1, ge / max(0.001, gsus)));
+  gfx_set(0, 0.85, 1); gfx_circle(gxp, py1 - ph0 * ge, 5, 1);
+);
+
+// ---- la zone du fichier audio ----
+zx = 14; zy = 286; zw = gfx_w - 28; zh = gfx_h - 286 - 14;
+gfx_set(0.11, 0.12, 0.14); gfx_rect(zx, zy, zw, zh);
+gfx_set(0.3, 0.31, 0.36); gfx_rect(zx, zy, zw, zh, 0);
+gfx_setfont(3, "Arial", 14);
+loaded ? (
+  // zone jouee
+  xa = zx + zw * min(slider3, slider4) / 100; xb = zx + zw * max(slider3, slider4) / 100;
+  gfx_set(0.894, 0.071, 0.153, 0.14); gfx_rect(xa, zy, max(1, xb - xa), zh);
+  // forme d'onde
+  mid = zy + zh / 2 + 8; amp = (zh - 40) / 2;
+  gfx_set(0.0, 0.85, 1.0, 0.9);
+  gi = 0;
+  loop(zw - 2,
+    gk = floor(gi / (zw - 2) * NPK); gp = PK[gk] * amp;
+    gfx_line(zx + 1 + gi, mid - gp, zx + 1 + gi, mid + gp);
+    gi += 1;
+  );
+  gfx_set(0.894, 0.071, 0.153, 1); gfx_rect(xa - 1, zy, 2, zh); gfx_rect(xb - 1, zy, 2, zh);
+  gfx_set(1, 1, 1); gfx_x = zx + 10; gfx_y = zy + 8;
+  // seulement le nom du fichier, sans le chemin
+  gn = strlen(#path) - 1;
+  while (gn >= 0 && str_getchar(#path, gn) != 47 && str_getchar(#path, gn) != 92) ( gn -= 1; );
+  strcpy_substr(#name, #path, gn + 1);
+  gfx_drawstr(#name); gfx_drawstr("   ");
+  gfx_set(0.65, 0.68, 0.72); gfx_drawnumber(slen / ssr, 2); gfx_drawstr(" s");
+  src == 0 ? ( gfx_x = zx + 10; gfx_y = zy + zh - 22; gfx_set(1, 0.75, 0.3);
+    gfx_drawstr("Les notes MIDI jouent l'oscillateur : Source > Fichier audio pour jouer ce fichier."); );
+) : (
+  gfx_set(0.65, 0.68, 0.72);
+  gfx_measurestr("Glissez ici un fichier audio (wav, mp3, ogg, flac...)", tw, th);
+  gfx_x = zx + (zw - tw) / 2; gfx_y = zy + zh / 2 - 16;
+  gfx_drawstr("Glissez ici un fichier audio (wav, mp3, ogg, flac...)");
+  gfx_measurestr("Le Do central (C4) le rejoue a sa hauteur d'origine.", tw, th);
+  gfx_x = zx + (zw - tw) / 2; gfx_y = zy + zh / 2 + 6;
+  gfx_drawstr("Le Do central (C4) le rejoue a sa hauteur d'origine.");
+);
