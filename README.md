@@ -9,19 +9,24 @@ Ils accompagnent le cours « Environnements sonores » (Transmédia M1, Haute É
 | **HEAJ Synthé-Sampler** | Instrument (JSFX) | Apprendre la synthèse et le sampling : source, filtre, enveloppe. |
 | **HEAJ Altération** | Script (ReaScript Lua) | Les gestes d'altération réunis dans une seule fenêtre. |
 
-## Télécharger
+## Installer avec ReaPack (recommandé)
 
-Bouton vert **Code > Download ZIP**, en haut de cette page, puis décompressez l'archive.
+[ReaPack](https://reapack.com/) installe les outils et les tient à jour.
 
-## Installer
+1. **Installer ReaPack**, une seule fois : téléchargez-le sur [reapack.com](https://reapack.com/). Dans Reaper, **Options > Show REAPER resource path in explorer/finder**, copiez le fichier dans le dossier `UserPlugins`, puis redémarrez Reaper.
+2. **Importer ce dépôt** : **Extensions > ReaPack > Import repositories…**, collez cette adresse, puis **OK** :
 
-Les dossiers de ce dépôt reprennent ceux de Reaper : `Effects` et `Scripts`.
+   ```
+   https://github.com/nicolasdebois-pixel/heajenvsono/raw/main/index.xml
+   ```
 
-1. Dans Reaper : **Options > Show REAPER resource path in explorer/finder**.
-2. Copiez le contenu du dossier `Effects` de ce dépôt dans le dossier `Effects` de Reaper.
-3. Copiez le contenu du dossier `Scripts` de ce dépôt dans le dossier `Scripts` de Reaper.
-4. Redémarrez Reaper : les deux plugins apparaissent dans la liste des effets, sous « JS ».
-5. Pour le script : **Actions > Show action list > New action > Load ReaScript**, choisissez `HEAJ_Alteration.lua`, puis **Run**.
+3. **Installer les outils** : **Extensions > ReaPack > Browse packages**, cherchez `HEAJ`, sélectionnez les trois outils, clic droit **Install**, puis **Apply**.
+
+Mise à jour : **Extensions > ReaPack > Synchronize packages**.
+
+## Installer sans ReaPack
+
+Bouton vert **Code > Download ZIP**, en haut de cette page. Dans Reaper, **Options > Show REAPER resource path in explorer/finder** : copiez le contenu du dossier `Effects` du zip dans le dossier `Effects` de Reaper, et celui de `Scripts` dans `Scripts`. Redémarrez Reaper, puis chargez le script une fois avec **Actions > Show action list > New action > Load ReaScript**.
 
 ## HEAJ Lieux
 

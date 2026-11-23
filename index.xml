@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<index version="1" name="HEAJ Environnements sonores">
+  <category name="HEAJ">
+    <reapack name="HEAJ_Lieux.jsfx" type="effect" desc="HEAJ Lieux - reverb de sound design (lieux et distance)">
+      <version name="1.0" author="Nicolas Debois (HEAJ)" time="2026-11-23T19:00:00Z">
+        <changelog><![CDATA[Premiere version : 16 lieux, distance, quantite de reverb, son direct.]]></changelog>
+        <source>https://github.com/nicolasdebois-pixel/heajenvsono/raw/main/Effects/HEAJ_Lieux.jsfx</source>
+      </version>
+    </reapack>
+    <reapack name="HEAJ_Synthe_Sampler.jsfx" type="effect" desc="HEAJ Synthe-Sampler - instrument pedagogique (source, filtre, enveloppe)">
+      <version name="2.2" author="Nicolas Debois (HEAJ)" time="2026-11-23T19:00:00Z">
+        <changelog><![CDATA[Boutons Preview et Play, courbe du filtre, courbe ADSR animee, indicateur de sortie.]]></changelog>
+        <source>https://github.com/nicolasdebois-pixel/heajenvsono/raw/main/Effects/HEAJ_Synthe_Sampler.jsfx</source>
+      </version>
+    </reapack>
+    <reapack name="HEAJ_Alteration.lua" type="script" desc="HEAJ Alteration - hauteur, vitesse, inversion, decoupage dans une seule fenetre">
+      <version name="1.0" author="Nicolas Debois (HEAJ)" time="2026-11-23T19:00:00Z">
+        <changelog><![CDATA[Premiere version.]]></changelog>
+        <source main="main">https://github.com/nicolasdebois-pixel/heajenvsono/raw/main/Scripts/HEAJ_Alteration.lua</source>
+      </version>
+    </reapack>
+  </category>
+  <metadata>
+    <link rel="website">https://github.com/nicolasdebois-pixel/heajenvsono</link>
+    <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}}
+{\pard \ql \f0 \sa180 \li0 \fi0 Outils du cours Environnements sonores (HEAJ, Transmedia M1) : HEAJ Lieux, HEAJ Synthe-Sampler et HEAJ Alteration.\par}
+}
+]]></description>
+  </metadata>
+</index>
